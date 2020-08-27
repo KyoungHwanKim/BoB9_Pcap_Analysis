@@ -14,15 +14,34 @@
 #include "RawPacket.h"
 #include <bits/stdc++.h>
 #include "json/json.h"
+#include <unistd.h>   
+#include <sys/stat.h>
+#include <errno.h>      
 
 using namespace std;
 
+
+u_char ftp_data[1111111];
+u_char smtp_data[1111111];
+u_char smtp_data_file[1111111];
+u_char http_data[111][1111111];
+int smtp_data_flag, http_get_flag;
+unsigned int ftp_data_size, ftp_data_idx, smtp_data_idx, smtp_data_file_idx;
+string http_get_filename;
+int http_data_idx[111];
+unsigned long http_sequence_num[111];
+int server_port = 0;
+int client_port = 0;
+
+vector<pair<int, string>> http_get_data_port; // HTTP 데이터 수집을 위해 선언
 vector<pair<int, string>> FTP_LOG;
 queue<pair<string, string>> FTP_QUEUE;
 int ftp_response_code;
 string ftp_response_arg, ftp_request_cmd, ftp_request_arg;
 
 Json::Value root;
+Json::Value smtp;
+Json::Value http;
 
 std::string getProtocolTypeAsString(pcpp::ProtocolType protocolType) {
    switch (protocolType) {
@@ -48,19 +67,12 @@ std::string printTcpFlags(pcpp::TcpLayer* tcpLayer) {
    std::string result = "";
 
    if (tcpLayer->getTcpHeader()->synFlag == 1) result += "SYN ";
-
    if (tcpLayer->getTcpHeader()->ackFlag == 1) result += "ACK ";
-
    if (tcpLayer->getTcpHeader()->pshFlag == 1) result += "PSH ";
-
    if (tcpLayer->getTcpHeader()->cwrFlag == 1) result += "CWR ";
-
    if (tcpLayer->getTcpHeader()->urgFlag == 1) result += "URG ";
-
    if (tcpLayer->getTcpHeader()->eceFlag == 1) result += "ECE ";
-
    if (tcpLayer->getTcpHeader()->rstFlag == 1) result += "RST ";
-
    if (tcpLayer->getTcpHeader()->finFlag == 1) result += "FIN ";
 
    return result;
@@ -96,20 +108,13 @@ uint8_t my_ntohs(uint8_t n) {
    return (n & 0xf0) >> 4 | (n & 0x0f) << 4;
 }
 
-u_char ftp_data[1111111];
-u_char smtp_data[1111111];
-u_char http_data[111][1111111];
-int smtp_data_flag, http_get_flag;
-unsigned int ftp_data_size, ftp_data_idx, smtp_data_idx;
-string http_get_filename;
-int http_data_idx[111];
-unsigned long http_sequence_num[111];
-
-vector<pair<int, string>> http_get_data_port;
 
 int main(int argc, char* argv[]) {
 
    char* filename = argv[1];
+   int ftpResult = mkdir( "FTP_directory" , 0777);
+   int smtpResult = mkdir( "SMTP_directory" , 0777);
+   int httpResult = mkdir( "HTTP_directory" , 0777);
 
    // use the IFileReaderDevice interface to automatically identify file type (pcap/pcap-ng)
    // and create an interface instance that both readers implement
@@ -130,7 +135,7 @@ int main(int argc, char* argv[]) {
    unsigned int ftp_data_port = 0;
    unsigned int packet_num = 1;
 
-   // 여기서부터 패킷 반복적으로 읽어오기...
+   // 패킷 반복적으로 읽어오기
    while(1) {
       pcpp::RawPacket rawPacket;
 
@@ -141,9 +146,8 @@ int main(int argc, char* argv[]) {
       // parse the raw packet
       pcpp::Packet parsedPacket(&rawPacket);
 
-      //About Each Layer : type, total length, header length, payload length
+      //각 계층마다 : type, total length, header length, payload length
       printf("\n\n=========================================================================================================\n");
-      printf("%d번째 패킷\n", packet_num);
       int is_tcp =0;
       int payload_length =0;
       int total_length =0;
@@ -162,70 +166,64 @@ int main(int argc, char* argv[]) {
 
       //****************Ethernet layer*****************
       pcpp::EthLayer* ethernetLayer = parsedPacket.getLayerOfType<pcpp::EthLayer>();
-
       if (ethernetLayer == NULL) {
          printf("Something went wrong, couldn't find Ethernet layer\n");
          continue;
       }
-
-      // print the source and dest MAC addresses and the Ether type
+      // 이더넷 헤더에서 SrcMac, DstMac, Ether type 출력
       printf("\nSource MAC address: %s\n", ethernetLayer->getSourceMac().toString().c_str());
       printf("Destination MAC address: %s\n", ethernetLayer->getDestMac().toString().c_str());
       printf("Ether type = 0x%X\n", ntohs(ethernetLayer->getEthHeader()->etherType));
 
 
+
       //****************IPv4 layer*****************
       pcpp::IPv4Layer* ipLayer = parsedPacket.getLayerOfType<pcpp::IPv4Layer>();
-
       if (ipLayer == NULL) {
          printf("Couldn't find IPv4 layer\n");
          continue;
       }
-
-      // print source and dest IP addresses, IP ID and TTL
+      // IP 헤더에서 SrcIP, DstIP, IP ID , TTL 출력
       printf("\nSource IP address: %s\n", ipLayer->getSrcIpAddress().toString().c_str());
       printf("Destination IP address: %s\n", ipLayer->getDstIpAddress().toString().c_str());
       printf("IP ID: 0x%X\n", ntohs(ipLayer->getIPv4Header()->ipId));
       printf("TTL: %d\n", ipLayer->getIPv4Header()->timeToLive);
 
 
+
       //****************TCP layer*****************
       pcpp::TcpLayer* tcpLayer = parsedPacket.getLayerOfType<pcpp::TcpLayer>();
-
       if (tcpLayer == NULL) {
          printf("Couldn't find TCP layer\n");
          continue;
       }
-
-      // printf TCP source and dest ports, window size, and the TCP flags 
+      // TCP 헤더에서 SrcPort, DstPort, window size, TCP flags 출력
       printf("\nSource TCP port: %d\n", (int)ntohs(tcpLayer->getTcpHeader()->portSrc));
-      int src_port = (int)ntohs(tcpLayer->getTcpHeader()->portSrc);
-
       printf("Destination TCP port: %d\n", (int)ntohs(tcpLayer->getTcpHeader()->portDst));
-      int dst_port = (int)ntohs(tcpLayer->getTcpHeader()->portDst);
-
       printf("Window size: %d\n", (int)ntohs(tcpLayer->getTcpHeader()->windowSize));
       printf("TCP flags: %s\n", printTcpFlags(tcpLayer).c_str());
       printf("TCP Sequence Number : %lu\n", ntohl(tcpLayer->getTcpHeader()->sequenceNumber));
       printf("TCP Ack Number : %lu\n", ntohl(tcpLayer->getTcpHeader()->ackNumber));
+      // HTTP, SMTP, FTP 의 구분을 위해서 src, dst의 port번호 저장
+      int src_port = (int)ntohs(tcpLayer->getTcpHeader()->portSrc); 
+      int dst_port = (int)ntohs(tcpLayer->getTcpHeader()->portDst);
 
-      // go over all TCP options in this layer and print its type
-      printf("TCP options: ");
-      for (pcpp::TcpOption tcpOption = tcpLayer->getFirstTcpOption(); tcpOption.isNotNull(); tcpOption = tcpLayer->getNextTcpOption(tcpOption))
-         printf("%s ", printTcpOptionType(tcpOption.getTcpOptionType()).c_str());
-         printf("\n");
+      pcpp::HttpRequestLayer* httpRequestLayer = parsedPacket.getLayerOfType<pcpp::HttpRequestLayer>();
+      int payload_start = total_length - payload_length;
 
-      if (http_get_data_port.size() >= 1 && src_port == 80) { // HTTP 데이터 모으기
-         int flag1 = 0;
+
+      //HTTP : 서버에서 SrcPort 80으로 오는 패킷의 데이터 합치기
+      if (http_get_data_port.size() >= 1 && src_port == 80) { 
+         int flag1 = 0; 
          int port_num = -1;
          for (int i = 0; i < http_get_data_port.size(); i++) {
             if (dst_port == http_get_data_port[i].first) {
-               flag1 = 1;
-               port_num = i;
+               flag1 = 1;  //데이터가 들어오기 시작한 포트번호인 경우
+               port_num = i;  
                break;
             }
          }
-         if (flag1) {
+         if (flag1) { //해당 포트번호로 들어오는 패킷 합치기
             if (http_sequence_num[port_num] == 0) {
                http_sequence_num[port_num] = ntohl(tcpLayer->getTcpHeader()->sequenceNumber);
             } else if (http_sequence_num[port_num] < ntohl(tcpLayer->getTcpHeader()->sequenceNumber)) {
@@ -246,53 +244,141 @@ int main(int argc, char* argv[]) {
 
 
       //*************** HTTP ? SMTP ? FTP ? *****************
-      pcpp::HttpRequestLayer* httpRequestLayer = parsedPacket.getLayerOfType<pcpp::HttpRequestLayer>();
-
-      int payload_start = total_length - payload_length;
-
-      if (is_tcp == 4) {
+      if (is_tcp == 4) { //payload 있음
          if (httpRequestLayer == NULL) {
-            /*
-            if((src_port == 25)||(src_port == 465)||(src_port == 587)||(src_port == 2525)||
-            (dst_port == 25)||(dst_port == 465)||(dst_port == 587)||(dst_port == 2525)) {*/
-            if ((src_port == 587 || src_port == 3326) && (dst_port == 587 || dst_port == 3326)) {
-               // SMTP 패킷이라면...
+
+            //*********************SMTP 패킷*********************
+            if ((src_port == 25 || src_port == 465 || src_port == 587 ) || (dst_port == 25 || dst_port == 465 || dst_port == 587)) {  
                printf("\n[ SMTP Packet ]\n");
 
                const u_char* packet;
                packet = (u_char*) rawPacket.getRawData();
                string smtp_response_code = "";
-               if (src_port == 587) { // server -> client
-                  printf("(server) -> (client)\n");
-                  for (int i = payload_start; i < payload_start + 3; i++) {
+
+               //SMTP response code 가져오기
+               for (int i = payload_start; i < payload_start + 3; i++) {
                      smtp_response_code += packet[i];
                   }
-                  cout << "smtp response code : " << smtp_response_code << '\n';
-                  if (smtp_response_code == "354") {
-                     smtp_data_flag = 1;
-                  }
-                  if (smtp_data_flag && smtp_response_code == "250") {
-                     smtp_data_flag = 0;
-                     for (int i = 0; i < smtp_data_idx; i++) {
-                        printf("%c" , smtp_data[i]);
-                     }
-                  }
-               } else if (dst_port == 587) { // client -> server
-                  printf("(client) -> (server)\n");
-                  if (smtp_data_flag) {
-                     for (int i = payload_start; i < total_length; i++) {
-                        smtp_data[smtp_data_idx++] = packet[i];
-                     }
-                  }
+
+               if(smtp_response_code == "220"){  // 220이면 TCP 연결 시작, 서버 준비완료, SMTP 통신 시작
+                     server_port =  src_port ;
+                     client_port =  dst_port ;
                }
 
-               string response_code = "";
-               printf("Response : ");
-               for(int i = payload_start; i<total_length; i++) {
-                  printf("%c", packet[i]);
-               }
-               printf("\n");
+               else{
+                  if (src_port == server_port ) { // server -> client
+                     printf("(server) -> (client)  \n");
+       
+                     for(int i= payload_start; i < total_length; i++){
+                        printf("%c", packet[i]);
+                     }
 
+                     if (smtp_response_code == "354") {  // 354이면 서버에서 데이터를 보냄.
+                        smtp_data_flag = 1;
+                     }
+
+                     if (smtp_data_flag && smtp_response_code == "250") {  // 250이면 서버에서 데이터가 다 도착했음.
+                        smtp_data_flag = 0;
+                        int temp_int = 0;
+                        int temp_flag= 0;
+
+                        printf("\n\n\n --------------  This is DATA  --------------  \n\n\n");
+                        for (int i = 0; i < smtp_data_idx; i++) {
+                           printf("%c" , smtp_data[i]);
+                           //filename 이라는 문자열이 들어오면, smtp_data에서 해당 위치를 저장
+                           if(smtp_data[i]=='f'&&  smtp_data[i+1]=='i'&& smtp_data[i+2]=='l'&& smtp_data[i+3]=='e'&& smtp_data[i+4]=='n'&& smtp_data[i+5]=='a'&&smtp_data[i+6]=='m'&&smtp_data[i+7]=='e'){
+                              temp_int = i;
+                           }
+                        }
+
+                        char filename_smtp[111] = "";
+                        int filename_idx =0;
+                        for(int i = temp_int + 10 ; ; i++){
+                           filename_smtp[filename_idx++] = smtp_data[i];  //smtp에 첨부된 파일이름저장
+                           if(smtp_data[i+1]=='"' || smtp_data[i+1]=='/r' || smtp_data[i+1]=='/t' || smtp_data[i+1]=='/n') {filename_smtp[filename_idx] = '\0'; break;}
+                        }
+                        printf("filename : ");
+                        for(int i =0; i< filename_idx; i++){printf("%c", filename_smtp[i]);}
+                        printf("\n\n");
+
+                        for(int k = temp_int; k < smtp_data_idx; k++){
+                           if(smtp_data[k] == '"') {
+                              temp_flag = k;
+                              break;
+                           }
+                        }
+
+                        for(int k = temp_flag+1 ; k < smtp_data_idx; k++){
+                           if(smtp_data[k] == '"') {
+                              temp_flag = k+4;
+                              break;
+                           }
+                        }
+
+                        for(int i = temp_flag; i < smtp_data_idx; i++){
+                           smtp_data_file[smtp_data_file_idx++] = smtp_data[i];
+                           //여러 패킷으로 나눠져서 들어오는 부분중에서  --------=NextPart_~~ 부분을 삭제하고 저장.
+                           if(  smtp_data[i+1]=='-'&& smtp_data[i+2]=='-'&& smtp_data[i+3]=='-'&& smtp_data[i+4]=='-'&& smtp_data[i+5]=='-'&&smtp_data[i+6]=='-'&&smtp_data[i+7]=='='&&smtp_data[i+8]=='_'){
+                              smtp_data_file[smtp_data_file_idx]='\0';
+                              break;
+                           }
+                        }
+
+                        //첨부된 파일을 형식에 맞게 추출. 파일 이름에 .dat와 같은 식으로 명시되어 있음.
+                        char smtp_file_path[111111] = "SMTP_directory/";
+                        strcat(smtp_file_path, filename_smtp);
+                        FILE * file = fopen(smtp_file_path, "wb");
+                        fwrite (smtp_data_file, sizeof(smtp_data_file), 1, file);
+                        fclose (file);
+
+                        printf("\n\n\n --------------  DATA END  --------------  \n\n\n");
+                        smtp_data_idx = 0;
+
+                        Json::Value temp;
+                        temp["Packet Number"] = packet_num++;
+                        temp["Source Mac"] = ethernetLayer->getSourceMac().toString();
+                        temp["Destination Mac"] = ethernetLayer->getDestMac().toString();
+                        temp["Source Ip"] = ipLayer->getSrcIpAddress().toString();
+                        temp["Destination Ip"] = ipLayer->getDstIpAddress().toString();
+                        temp["Source TCP Port"] = (int)ntohs(tcpLayer->getTcpHeader()->portSrc);
+                        temp["Destination TCP Port"] = (int)ntohs(tcpLayer->getTcpHeader()->portDst);
+                        temp["Protocol"] = "SMTP-DATA";
+
+                        smtp.append(temp);
+                     }  
+
+
+                  } else if (dst_port == server_port ) { // client -> server
+                     printf("(client) -> (server)\n");
+                     if (smtp_data_flag) {
+                        for (int i = payload_start; i < total_length; i++) {
+                           smtp_data[smtp_data_idx++] = packet[i];
+                        }
+                        printf(" == DATA fragment == \n");
+                     }
+                     else{
+                        for(int i= payload_start; i < total_length; i++){
+                           printf("%c", packet[i]);
+                        }
+                     }
+
+                     Json::Value temp;
+                     temp["Packet Number"] = packet_num++;
+                     temp["Source Mac"] = ethernetLayer->getSourceMac().toString();
+                     temp["Destination Mac"] = ethernetLayer->getDestMac().toString();
+                     temp["Source Ip"] = ipLayer->getSrcIpAddress().toString();
+                     temp["Destination Ip"] = ipLayer->getDstIpAddress().toString();
+                     temp["Source TCP Port"] = (int)ntohs(tcpLayer->getTcpHeader()->portSrc);
+                     temp["Destination TCP Port"] = (int)ntohs(tcpLayer->getTcpHeader()->portDst);
+                     temp["Protocol"] = "SMTP client -> server";
+
+                     smtp.append(temp);
+                  }
+
+               }
+
+
+            //*********************FTP 패킷*********************
             } else if (src_port == 21) { // FTP Response 패킷이라면...
                printf("\n[ FTP Response Packet ]\n");
                const uint8_t* packet = rawPacket.getRawData();
@@ -310,7 +396,8 @@ int main(int argc, char* argv[]) {
                }
 
                std::string ftp_command = "";
-            
+
+               //FTP response code 가져오기
                printf("\nResponse Code : ");
                for (int i = start; i < start + 3; i++) {
                   ftp_command += (u_char) packet[i];
@@ -331,9 +418,12 @@ int main(int argc, char* argv[]) {
                ftp_response_arg = ftp_command;
                std::cout << ftp_response_arg << '\n';
                
+               //FTP_LOG 벡터에 response code, arg 저장
                FTP_LOG.push_back({ ftp_response_code, ftp_response_arg });
                
-               if (ftp_response_code == 227) { // passive mode
+               
+               //Passive Mode 227
+               if (ftp_response_code == 227) { 
                   ftp_data_port = 0;
                   std::string port_temp = "";
                   for (int i = 23; i < ftp_command.length(); i++) {
@@ -355,13 +445,16 @@ int main(int argc, char* argv[]) {
                      tok = strtok(NULL, ",");
                   }
                }
-               if (ftp_response_code == 226 && ftp_data_size != 0) { // 파일 전송 등이 완료된 코드
+
+               //파일 전송 완료 226
+               if (ftp_response_code == 226 && ftp_data_size != 0) { 
                   printf("ftp data size : %d\n", ftp_data_size);
                
-                  // 여기서 파일 저장함...
-                  // 파일 확장자별로 분리해서 저장하자...
+                  // 추출한 데이터를 파일로 저장
                   ofstream myfile;
-                  myfile.open(ftp_request_arg, ios::binary);
+                  string ftp_file_path = "FTP_directory/";
+                  ftp_file_path = ftp_file_path + ftp_request_arg;
+                  myfile.open(ftp_file_path, ios::binary);
                   myfile.write((const char*) ftp_data, ftp_data_size);
                   myfile.close();
                   memset(ftp_data, 0, sizeof(ftp_data));
@@ -410,7 +503,7 @@ int main(int argc, char* argv[]) {
                      cmd_flag = 1;
                      continue;
                   }
-                  if (packet[i] == 0x0d) break; // \r을 만나면 바로 종료... 끝이니까...
+                  if (packet[i] == 0x0d) break; // \r을 만나면 바로 종료
                   ftp_command += (u_char) packet[i];
                   printf("%c", packet[i]);
                }
@@ -515,6 +608,25 @@ int main(int argc, char* argv[]) {
          printf("HTTP cookie: %s\n", httpRequestLayer->getFieldByName(PCPP_HTTP_COOKIE_FIELD)->getFieldValue().c_str());
          printf("HTTP full URL: %s\n", httpRequestLayer->getUrl().c_str());
 
+         Json::Value temp;
+         temp["Packet Number"] = packet_num++;
+         temp["Source Mac"] = ethernetLayer->getSourceMac().toString();
+         temp["Destination Mac"] = ethernetLayer->getDestMac().toString();
+         temp["Source Ip"] = ipLayer->getSrcIpAddress().toString();
+         temp["Destination Ip"] = ipLayer->getDstIpAddress().toString();
+         temp["Source TCP Port"] = (int)ntohs(tcpLayer->getTcpHeader()->portSrc);
+         temp["Destination TCP Port"] = (int)ntohs(tcpLayer->getTcpHeader()->portDst);
+         temp["Protocol"] = "HTTP";
+         temp["HTTP method"] = printHttpMethod(httpRequestLayer->getFirstLine()->getMethod()).c_str();
+         temp["HTTP URI"] = httpRequestLayer->getFirstLine()->getUri().c_str();
+         temp["HTTP host"] = httpRequestLayer->getFieldByName(PCPP_HTTP_HOST_FIELD)->getFieldValue().c_str();
+         temp["HTTP user-agent"] = httpRequestLayer->getFieldByName(PCPP_HTTP_USER_AGENT_FIELD)->getFieldValue().c_str();
+         temp["HTTP cookie"] = httpRequestLayer->getFieldByName(PCPP_HTTP_COOKIE_FIELD)->getFieldValue().c_str();
+         temp["HTTP full URL"] = httpRequestLayer->getUrl().c_str();
+
+
+         http.append(temp);
+
          string http_cmd = printHttpMethod(httpRequestLayer->getFirstLine()->getMethod());
          if (http_cmd == "GET") {
             char* http_temp = new char[1000];
@@ -532,14 +644,18 @@ int main(int argc, char* argv[]) {
             http_get_filename = http_tok_arr[http_tok_arr.size() - 1];
             cout << http_get_filename << '\n';
             for (int i = 0; i < http_get_data_port.size(); i++) {
+               //HTTP 에서 추출한 데이터 파일 형태로 추출
                if (http_get_data_port[i].first == src_port) {
                   ofstream file;
-                  file.open(http_get_data_port[i].second, ios::binary);
+                  string http_file_path = "HTTP_directory/";
+                  http_file_path = http_file_path+ http_get_data_port[i].second;
+                  file.open(http_file_path, ios::binary);
                   file.write((const char*) http_data[i], http_data_idx[i]);
                   file.close();
                   memset(http_data[i], 0, sizeof(http_data[i]));
                   http_get_data_port[i].first = -1;
                }
+               
             }
             http_get_data_port.push_back({ src_port, http_get_filename });
          }
@@ -566,17 +682,25 @@ int main(int argc, char* argv[]) {
    */
 
   //JSON 쓰기
-   //ofstream outFile("log.json", ios::out);
-   //outFile << root;
+   char ftp_file_path[111111] = "FTP_directory/";
+   strcat(ftp_file_path, "log_ftp.json");
+   std::ofstream ftpFile(ftp_file_path, ios::out);
+   ftpFile << root;
+   ftpFile.close();
 
-   //HTTP 파일 만들기
-   for (int i = 0; i < http_get_data_port.size(); i++) {
-      ofstream file;
-      if (http_get_data_port[i].first == -1) continue;
-      file.open(http_get_data_port[i].second, ios::binary);
-      file.write((const char*) http_data[i], http_data_idx[i]);
-      file.close();
-   }
+
+   char http_file_path[111111] = "HTTP_directory/";
+   strcat(http_file_path, "log_http.json");
+   std::ofstream httpFile(http_file_path, ios::out);
+   httpFile << http;
+   httpFile.close();
+
+
+   char smtp_file_path[111111] = "SMTP_directory/";
+   strcat(smtp_file_path, "log_smtp.json");
+   std::ofstream smtpFile(smtp_file_path, ios::out);
+   smtpFile << smtp;
+   smtpFile.close();
 
 
    reader->close();
